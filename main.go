@@ -27,6 +27,7 @@ type JsonOutput struct {
 	Start    uint64   `json:"span-start-ns"`
 	End      uint64   `json:"span-end-ns"`
 	Duration uint64   `json:"duration-ns"`
+	ExitCode uint8    `json:"exit-code"`
 }
 
 //go:generate  go run github.com/cilium/ebpf/cmd/bpf2go -type CommandEndEvent -type CommandParameterEvent proctracer proc-tracer.c
@@ -126,6 +127,7 @@ func main() {
 					Start:    commandEndEvent.StartTimeNs,
 					End:      commandEndEvent.EndTimeNs,
 					Duration: uint64(time.Duration(commandEndEvent.EndTimeNs - commandEndEvent.StartTimeNs).Nanoseconds()),
+					ExitCode: commandEndEvent.ExitCode,
 				})
 				if err != nil {
 					slog.Error("failed to marshal json", "error", err)
