@@ -5,11 +5,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -20,20 +20,26 @@ import (
 // https://github.com/iovisor/bcc/blob/master/docs/reference_guide.md
 
 type JsonOutput struct {
+	uid      uint32   `json:"uid"`
 	Pid      uint32   `json:"pid"`
 	PPid     uint32   `json:"ppid"`
-	Command  string   `json:"command"`
+	Command  string   `json:"name"`
+	FileName string   `json:"fileName"`
 	Args     []string `json:"args"`
-	Start    uint64   `json:"span-start-ns"`
-	End      uint64   `json:"span-end-ns"`
-	Duration uint64   `json:"duration-ns"`
-	ExitCode uint8    `json:"exit-code"`
+	Start    uint64   `json:"startTimeNs"`
+	Duration uint64   `json:"durationNs"`
+	ExitCode uint8    `json:"exitCode"`
 }
 
 //go:generate  go run github.com/cilium/ebpf/cmd/bpf2go -type CommandEndEvent -type CommandParameterEvent proctracer proc-tracer.c
 func main() {
-	logJson := flag.Bool("json", false, "enables the json output of the command")
+	logJson := flag.String("format", "json", "enables the json output of the command")
+	output := flag.String("output", "", "enables the json output of the command")
 	flag.Parse()
+
+	if *logJson != "json" {
+		log.Fatal("--format only supports [json]")
+	}
 
 	// Remove resource limits for kernels <5.11.
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -85,7 +91,25 @@ func main() {
 	// to get the event to arg
 	commandParameters := map[uint32][]proctracerCommandParameterEvent{}
 
+	writer := io.Discard
+	if *output != "" {
+		file, err := os.Create(*output)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		defer func(file *os.File) {
+			err := file.Close()
+			if err != nil {
+				slog.Warn("failed to close the output file", "error", err, "file", *output)
+			}
+		}(file)
+
+		writer = file
+	}
+
 	for {
+
 		record, err := reader.Read()
 		if err != nil {
 			slog.Error("failed to read event", "error", err)
@@ -118,14 +142,13 @@ func main() {
 
 			logger.Info("command finished", "parameters", args, "exit-code", commandEndEvent.ExitCode, "start-time", commandEndEvent.StartTimeNs, "end-time", commandEndEvent.EndTimeNs, "duration", time.Duration(commandEndEvent.EndTimeNs-commandEndEvent.StartTimeNs).Seconds())
 
-			if *logJson {
+			if *logJson == "json" {
 				data, err := json.Marshal(JsonOutput{
 					Pid:      commandEndEvent.Pid,
 					PPid:     commandEndEvent.Ppid,
 					Command:  command,
 					Args:     args,
 					Start:    commandEndEvent.StartTimeNs,
-					End:      commandEndEvent.EndTimeNs,
 					Duration: uint64(time.Duration(commandEndEvent.EndTimeNs - commandEndEvent.StartTimeNs).Nanoseconds()),
 					ExitCode: commandEndEvent.ExitCode,
 				})
@@ -134,7 +157,17 @@ func main() {
 					os.Exit(1)
 				}
 
-				fmt.Println(string(data))
+				_, err = writer.Write(data)
+				if err != nil {
+					slog.Error("failed to write json", "error", err)
+					os.Exit(1)
+				}
+
+				_, err = writer.Write([]byte("\n"))
+				if err != nil {
+					slog.Error("failed to write json", "error", err)
+					os.Exit(1)
+				}
 			}
 
 		}
